@@ -1,0 +1,92 @@
+FUNCTION ExtractTextFromDocumentImage(inputImage)
+    // -------------------------------------------------------------------------
+    // PURPOSE: Read a document image, preprocess it using OpenCV-like operations,
+    //          correct orientation, detect text regions, and run OCR text extraction.
+    // INPUT:   inputImage - Raw input image matrix (BGR or Grayscale)
+    // OUTPUT:  extractedText - String containing recognized text
+    // -------------------------------------------------------------------------
+
+    // STEP 1: VALIDATION AND INITIALIZATION
+    IF inputImage IS NULL OR inputImage IS EMPTY THEN
+        RETURN "Error: Invalid image input."
+    END IF
+
+    DECLARE grayImage AS Matrix
+    DECLARE blurredImage AS Matrix
+    DECLARE binaryImage AS Matrix
+    DECLARE deskewedImage AS Matrix
+    DECLARE textBoundingBoxes AS List of Rectangles
+    DECLARE extractedText AS String = ""
+
+    // STEP 2: PREPROCESSING (Color Conversion & Noise Reduction)
+    // Convert 3-channel color image to single-channel grayscale
+    grayImage = ConvertColor(inputImage, COLOR_BGR2GRAY)
+
+    // Apply Gaussian Blur to reduce high-frequency noise while preserving edges
+    blurredImage = GaussianBlur(grayImage, kernelSize=(5, 5), sigmaX=0)
+
+    // STEP 3: BINARIZATION AND THRESHOLDING
+    // Convert grayscale image to binary using adaptive thresholding for uneven lighting
+    binaryImage = AdaptiveThreshold(blurredImage, 
+                                    maxValue=255, 
+                                    method=ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                    thresholdType=THRESH_BINARY_INV, 
+                                    blockSize=11, 
+                                    C=2)
+
+    // STEP 4: DESKEWING AND ORIENTATION CORRECTION
+    // Find all non-zero pixel coordinates to calculate minimum area bounding box
+    DECLARE pixelPoints AS List of Points = FindNonZeroPixels(binaryImage)
+    DECLARE minAreaBox AS RotatedRect = ComputeMinAreaRect(pixelPoints)
+    DECLARE skewAngle AS Float = minAreaBox.angle
+
+    // Adjust angle based on box orientation convention (-90 to +90 degrees)
+    IF skewAngle < -45 THEN
+        skewAngle = skewAngle + 90
+    END IF
+
+    // Rotate binary and gray image if skew angle is significant (> 0.5 degrees)
+    IF ABSOLUTE_VALUE(skewAngle) > 0.5 THEN
+        DECLARE rotationMatrix AS Matrix = GetRotationMatrix2D(minAreaBox.center, skewAngle, scale=1.0)
+        deskewedImage = WarpAffine(binaryImage, rotationMatrix, binaryImage.size)
+    ELSE
+        deskewedImage = binaryImage
+    END IF
+
+    // STEP 5: MORPHOLOGICAL OPERATIONS FOR TEXT REGION DETECTION
+    // Define a rectangular kernel stretched horizontally to merge characters into words/lines
+    DECLARE kernel AS Matrix = GetStructuringElement(MORPH_RECT, size=(15, 3))
+    DECLARE dilatedImage AS Matrix = Dilate(deskewedImage, kernel, iterations=2)
+
+    // STEP 6: CONTOUR DETECTION & REGION OF INTEREST (ROI) EXTRACTION
+    DECLARE contours AS List of Contours
+    contours = FindContours(dilatedImage, mode=RETR_EXTERNAL, method=CHAIN_APPROX_SIMPLE)
+
+    // Sort contours from top to bottom (reading order)
+    contours = SortContoursByPosition(contours, direction="TOP_TO_BOTTOM")
+
+    // STEP 7: OCR ENGINE EXECUTION
+    DECLARE ocrEngine AS OCREngineInstance = InitializeOCREngine(language="eng", psmMode=AUTO)
+
+    FOR EACH contour IN contours DO
+        DECLARE boundingBox AS Rect = ComputeBoundingRect(contour)
+
+        // Filter out noise based on minimal area and aspect ratio constraints
+        IF boundingBox.width > 10 AND boundingBox.height > 10 THEN
+            // Extract region from the processed grayscale image
+            DECLARE imageROI AS Matrix = CropRegion(grayImage, boundingBox)
+
+            // Perform OCR on the cropped ROI
+            DECLARE regionText AS String = ocrEngine.RecognizeText(imageROI)
+
+            // Append extracted text with newline separation
+            extractedText = CONCATENATE(extractedText, regionText, "\n")
+        END IF
+    END FOR
+
+    // STEP 8: POST-PROCESSING & RETURN RESULT
+    extractedText = TrimWhitespaceAndClean(extractedText)
+
+    RETURN extractedText
+
+END FUNCTION
